@@ -85,16 +85,7 @@ void remove_buffer(buffer_table_t* table, uint64_t addr)
 
 int main(int argc, char** argv)
 {
-	int a;
 	buffer_table_t* table = init_buffer_table();
 	dram_buffer_t* buffer = init_dram_buffer(table, 5);
-	check_buffer(buffer, 0);
-	check_buffer(buffer, 0);
-	check_buffer(buffer, 1);
-	check_buffer(buffer, 1);
-	check_buffer(buffer, 2);
-	check_buffer(buffer, 4194304);
-	cout << buffer->buffer_table->entry_num;
-	cin >> a;
 	return 0;
 }
