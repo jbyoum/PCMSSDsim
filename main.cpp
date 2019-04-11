@@ -519,8 +519,8 @@ int main(int argc, char** argv)
 	printf("Total Execution Cycles: %llu\n", _pcm->reqQ->comp_time);
 
 	fclose(trace);
-	int a;
-	cin >> a;
+	//int a;
+	//cin >> a;
 	return 0;
 }
 
