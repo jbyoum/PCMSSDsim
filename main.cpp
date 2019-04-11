@@ -7,9 +7,11 @@
 
 #include "common.h"
 #include "HIL.h"
+#include "dram.h"
 
 using namespace std;
 
+uint64_t CYCLE_VAL = 0;
 bool is_req_comp = false;
 #define MAX_NUM_CHANNEL        2
 #define MAX_NUM_WAY            2
@@ -66,6 +68,7 @@ struct pcm_array_queue
 	mem_req_t       *_head;
 	mem_req_t       *_tail;
 	pcm_array_t     *_pcm_array;
+	uint64_t        comp_time;
 };
 
 struct mem_request_packet
@@ -73,7 +76,7 @@ struct mem_request_packet
 	//? general information of memory request packet
 	op_type         req_type;
 	uint64_t        phys_addr;      //? actual physical address.
-	uint64_t        comp_time;
+	
 	uint32_t        core_id;
 	command_t       next_command;
 	bool                        cmd_issuable;
@@ -117,6 +120,7 @@ pcm_queue_t* init_memory_request_queue(pcm_array_t* _pcm_array, uint32_t capacit
 	new_queue->n_req = 0;
 	new_queue->_head = NULL;
 	new_queue->_tail = NULL;
+	new_queue->comp_time = 0;
 	return new_queue;
 }
 
@@ -303,13 +307,14 @@ mem_req_t* init_request(uint64_t addr, op_type op)
 	return new_req;
 }
 
-void queue_commands(pcm_array_t* _pcm, uint64_t _clk)
+void queue_commands(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 {
 	mem_req_t* curr = _pcm->reqQ->_head;
 	uint32_t channel = curr->channel;
 	uint32_t way = curr->way;
 	uint32_t bank = curr->bank;
 	uint64_t row = curr->row;
+	uint64_t addr = curr->phys_addr;
 	/*printf("op: ");
 	cout << curr->req_type;
 	printf("\ncycle: ");
@@ -336,6 +341,12 @@ void queue_commands(pcm_array_t* _pcm, uint64_t _clk)
 		return;
 	}
 	//printf("channel: %u, way: %u, bank: %u, row: %lu\n", channel, way, bank, row);
+	buffer_table_t* table = buffer->buffer_table;
+	if (table->address_table[addr%BUF_SIZE] == addr)
+	{
+		curr->next_command = NOP;
+		return;
+	}
 
 	switch (_pcm->bank_state[channel][way][bank])
 	{
@@ -347,10 +358,6 @@ void queue_commands(pcm_array_t* _pcm, uint64_t _clk)
 		_pcm->next_read[channel][way][bank] = _clk + _pcm->tRCD + _pcm->tCAS;
 		_pcm->next_write[channel][way][bank] = _clk + _pcm->tRCD + _pcm->tCAS;
 
-		if (_pcm->data_bus[channel] <= _clk)
-			_pcm->data_bus[channel] = _clk + _pcm->tBL;
-		else
-			_pcm->data_bus[channel] = _pcm->data_bus[channel] + _pcm->tBL;
 
 		curr->next_command = ACT_CMD;
 		//else if (curr->req_type == WRITE)
@@ -377,13 +384,15 @@ void queue_commands(pcm_array_t* _pcm, uint64_t _clk)
 	}
 }
 
-void update(pcm_array_t* _pcm, uint64_t _clk)
+void update(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 {
 	mem_req_t* curr = _pcm->reqQ->_head;
 	uint32_t channel = curr->channel;
 	uint32_t way = curr->way;
 	uint32_t bank = curr->bank;
 	uint64_t row = curr->row;
+	uint64_t addr = curr->phys_addr;
+	buffer_table_t* table = buffer->buffer_table;
 
 	switch (curr->next_command)
 	{
@@ -418,9 +427,26 @@ void update(pcm_array_t* _pcm, uint64_t _clk)
 		break;
 
 	case NOP:
+		if (table->address_table[addr%BUF_SIZE] == addr)
+		{
+			//printf("HIT\n");
+			// buffer->dram_latency;
+			_pcm->reqQ->comp_time += buffer->dram_latency;
+			CYCLE_VAL += buffer->dram_latency;
+			mem_txq_remove_req(_pcm->reqQ, curr);
+			is_req_comp = true;
+			return;
+		}
 		if (_pcm->next_pre[channel][way][bank] <= _clk)
 		{
 			_pcm->bank_state[channel][way][bank] = IDLE;
+			if (_pcm->data_bus[channel] <= _clk)
+				_pcm->data_bus[channel] = _clk + _pcm->tBL;
+			else
+				_pcm->data_bus[channel] = _pcm->data_bus[channel] + _pcm->tBL;
+
+			_pcm->reqQ->comp_time = _pcm->data_bus[channel];
+			insert_buffer(table, addr);
 			mem_txq_remove_req(_pcm->reqQ, curr);
 			is_req_comp = true;
 		}
@@ -430,8 +456,9 @@ void update(pcm_array_t* _pcm, uint64_t _clk)
 	}
 }
 
-uint64_t CYCLE_VAL = 0;
+
 FILE *trace;
+#pragma warning(disable : 4996)
 
 int main(int argc, char** argv)
 {
@@ -439,10 +466,12 @@ int main(int argc, char** argv)
 	mem_req_t*   _req;
 	uint64_t     _addr;
 	op_type      _type;
-
+	buffer_table_t* table = init_buffer_table();
+	dram_buffer_t* buffer = init_dram_buffer(table, 5);
 	pcm_array_t* _pcm = init_pcm_array_structure(64, 2, 2, 4, 4, 8, 11, 11, 11, 39, 28, 8);
 
-	trace = fopen(argv[1], "r");
+	//trace = fopen(argv[1], "r");
+	trace = fopen("C:\\Users\\User\\source\\repos\\Project2\\Project2\\test.trc", "r");
 
 	/*
 	mem_req_t* _req = init_request(640 ,READ);
@@ -467,8 +496,8 @@ int main(int argc, char** argv)
 		}
 
 		is_req_comp = false;
-		queue_commands(_pcm, CYCLE_VAL);
-		update(_pcm, CYCLE_VAL);
+		queue_commands(_pcm, CYCLE_VAL, buffer);
+		update(_pcm, CYCLE_VAL, buffer);
 		end = 1;
 
 		for (int i = 0; i < MAX_NUM_CHANNEL; i++)
@@ -487,9 +516,70 @@ int main(int argc, char** argv)
 
 	}
 
-	printf("Total Execution Cycles: %llu\n", CYCLE_VAL);
+	printf("Total Execution Cycles: %llu\n", _pcm->reqQ->comp_time);
 
 	fclose(trace);
-
+	int a;
+	cin >> a;
 	return 0;
+}
+
+
+
+dram_buffer_t* init_dram_buffer(buffer_table_t* table, uint32_t latency)
+{
+	dram_buffer_t* new_buffer = (dram_buffer_t*)malloc(sizeof(dram_buffer_t));
+	new_buffer->dram_latency = latency;
+	new_buffer->buffer_table = table;
+	return new_buffer;
+}
+
+buffer_table_t* init_buffer_table()
+{
+	buffer_table_t* new_table = (buffer_table_t*)malloc(sizeof(buffer_table_t));
+	new_table->entry_num = 0;
+	for (uint32_t i = 0; i < BUF_SIZE; i++)
+	{
+		new_table->address_table[i] = UINT64_MAX;
+	}
+	return new_table;
+}
+
+void check_buffer(dram_buffer_t* buffer, uint64_t addr)
+{
+	buffer_table_t* table = buffer->buffer_table;
+	if (table->address_table[addr%BUF_SIZE] == addr)
+	{
+		printf("HIT\n");
+		// buffer->dram_latency;
+	}
+	else
+	{
+		printf("MISS\n");
+		insert_buffer(table, addr);
+	}
+}
+
+void insert_buffer(buffer_table_t* table, uint64_t addr)
+{
+	if (table->address_table[addr%BUF_SIZE] == UINT64_MAX)
+	{
+		table->address_table[addr%BUF_SIZE] = addr;
+		table->entry_num++;
+	}
+	else
+	{
+		table->address_table[addr%BUF_SIZE] = addr;
+	}
+}
+
+void remove_buffer(buffer_table_t* table, uint64_t addr)
+{
+	if (table->entry_num != 0)
+	{
+		table->address_table[addr%BUF_SIZE] = UINT64_MAX;
+		table->entry_num--;
+	}
+	else
+		printf("ERROR\n");
 }
