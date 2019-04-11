@@ -470,8 +470,8 @@ int main(int argc, char** argv)
 	dram_buffer_t* buffer = init_dram_buffer(table, 5);
 	pcm_array_t* _pcm = init_pcm_array_structure(64, 2, 2, 4, 4, 8, 11, 11, 11, 39, 28, 8);
 
-	//trace = fopen(argv[1], "r");
-	trace = fopen("C:\\Users\\User\\source\\repos\\Project2\\Project2\\test.trc", "r");
+	trace = fopen(argv[1], "r");
+	//trace = fopen("C:\\Users\\User\\source\\repos\\Project2\\Project2\\test.trc", "r");
 
 	/*
 	mem_req_t* _req = init_request(640 ,READ);
