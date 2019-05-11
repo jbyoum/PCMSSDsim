@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <iostream>
+#include <time.h>
 
 #include "common.h"
 #include "HIL.h"
@@ -17,6 +18,7 @@ bool is_req_comp = false;
 #define MAX_NUM_WAY            2
 #define MAX_NUM_BANK           4
 #define max(a,b) (((a)>(b))?(a):(b))
+#define UINT21_MAX 2097152 //2^21
 
 typedef struct pcm_array_queue                                   pcm_queue_t;
 typedef enum { IDLE, ACT, COL_READ, COL_WRITE, PRE }     state_t;
@@ -342,7 +344,7 @@ void queue_commands(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 	}
 	//printf("channel: %u, way: %u, bank: %u, row: %lu\n", channel, way, bank, row);
 	buffer_table_t* table = buffer->buffer_table;
-	if (table->address_table[addr%BUF_SIZE] == addr)
+	if (peek_buffer(buffer, addr))
 	{
 		curr->next_command = NOP;
 		return;
@@ -427,7 +429,7 @@ void update(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 		break;
 
 	case NOP:
-		if (table->address_table[addr%BUF_SIZE] == addr)
+		if (check_buffer(buffer, addr))
 		{
 			//printf("HIT\n");
 			// buffer->dram_latency;
@@ -469,6 +471,7 @@ int main(int argc, char** argv)
 	buffer_table_t* table = init_buffer_table();
 	dram_buffer_t* buffer = init_dram_buffer(table, 5);
 	pcm_array_t* _pcm = init_pcm_array_structure(64, 2, 2, 4, 4, 8, 11, 11, 11, 39, 28, 8);
+	srand((unsigned int)time(0));
 
 	trace = fopen(argv[1], "r");
 	//trace = fopen("C:\\Users\\User\\source\\repos\\Project2\\Project2\\test.trc", "r");
@@ -537,49 +540,93 @@ dram_buffer_t* init_dram_buffer(buffer_table_t* table, uint32_t latency)
 buffer_table_t* init_buffer_table()
 {
 	buffer_table_t* new_table = (buffer_table_t*)malloc(sizeof(buffer_table_t));
-	new_table->entry_num = 0;
-	for (uint32_t i = 0; i < BUF_SIZE; i++)
+	for (uint32_t i = 0; i < CACHE_WAY; i++)
 	{
-		new_table->address_table[i] = UINT64_MAX;
+		for (uint32_t j = 0; j < INDEX_SIZE; j++)
+		{
+			new_table->count[i][j] = 0;
+			new_table->valid[i][j] = 0;
+		}
 	}
 	return new_table;
 }
 
-void check_buffer(dram_buffer_t* buffer, uint64_t addr)
+bool peek_buffer(dram_buffer_t* buffer, uint64_t addr)
 {
 	buffer_table_t* table = buffer->buffer_table;
-	if (table->address_table[addr%BUF_SIZE] == addr)
+	uint64_t tag = addr / UINT21_MAX;
+	uint32_t index = ((addr % UINT21_MAX) / OFFSET);
+	for (uint32_t i = 0; i < CACHE_WAY; i++)
 	{
-		printf("HIT\n");
-		// buffer->dram_latency;
+		if((table->tag_table[i][index] == tag) && table->valid[i][index])
+		{
+			return true;
+		}
 	}
+	return false;
+}
+
+bool check_buffer(dram_buffer_t* buffer, uint64_t addr)
+{
+	buffer_table_t* table = buffer->buffer_table;
+	uint64_t tag = addr / UINT21_MAX;
+	uint32_t index = ((addr % UINT21_MAX) / OFFSET);
+	bool flag_hit = false;
+	for (uint32_t i = 0; i < CACHE_WAY; i++)
+	{
+		if((table->tag_table[i][index] == tag) && table->valid[i][index])
+		{
+			//주석 해제하면 LRU, 주석상태면 FIFO
+			//table->count[i][index] = 0;
+			flag_hit = true;
+		}
+		else
+			table->count[i][index]++;
+	}
+	if(flag_hit)
+		return true;
 	else
-	{
-		printf("MISS\n");
-		insert_buffer(table, addr);
-	}
+		return false;
 }
 
 void insert_buffer(buffer_table_t* table, uint64_t addr)
 {
-	if (table->address_table[addr%BUF_SIZE] == UINT64_MAX)
+	uint64_t tag = addr / UINT21_MAX;
+	uint32_t index = ((addr % UINT21_MAX) / OFFSET);
+	bool flag_full = true;
+	for(uint32_t i = 0; i < CACHE_WAY; i++)
 	{
-		table->address_table[addr%BUF_SIZE] = addr;
-		table->entry_num++;
+		if(!table->valid[i][index])
+			flag_full = false;
+	}
+	if (flag_full)
+	{
+		uint32_t max = 0;
+		uint32_t number;
+		for(uint32_t i = 0; i < CACHE_WAY; i++)
+		{
+			if(table->count[i][index] > max)
+			{
+				max = table->count[i][index];
+				number = i;
+			}
+		}
+		//주석해제하면 random
+		//number = rand() % CACHE_WAY;
+		table->tag_table[number][index] = tag;
+		table->count[number][index] = 0;
 	}
 	else
 	{
-		table->address_table[addr%BUF_SIZE] = addr;
+		for(uint32_t i = 0; i < CACHE_WAY; i++)
+		{
+			if(!table->valid[i][index])
+			{
+				table->tag_table[i][index] = tag;
+				table->count[i][index] = 0;
+				table->valid[i][index] = true;
+				i = CACHE_WAY;
+			}
+		}
 	}
-}
-
-void remove_buffer(buffer_table_t* table, uint64_t addr)
-{
-	if (table->entry_num != 0)
-	{
-		table->address_table[addr%BUF_SIZE] = UINT64_MAX;
-		table->entry_num--;
-	}
-	else
-		printf("ERROR\n");
 }
