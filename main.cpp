@@ -429,6 +429,7 @@ void update(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 		break;
 
 	case NOP:
+		
 		if (check_buffer(buffer, addr))
 		{
 			//printf("HIT\n");
@@ -439,6 +440,7 @@ void update(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 			is_req_comp = true;
 			return;
 		}
+		
 		if (_pcm->next_pre[channel][way][bank] <= _clk)
 		{
 			_pcm->bank_state[channel][way][bank] = IDLE;
@@ -452,6 +454,7 @@ void update(pcm_array_t* _pcm, uint64_t _clk, dram_buffer_t* buffer)
 			mem_txq_remove_req(_pcm->reqQ, curr);
 			is_req_comp = true;
 		}
+		
 		break;
 
 	default:        break;
@@ -544,10 +547,16 @@ buffer_table_t* init_buffer_table()
 	{
 		for (uint32_t j = 0; j < INDEX_SIZE; j++)
 		{
-			new_table->count[i][j] = 0;
 			new_table->valid[i][j] = 0;
+
 		}
 	}
+	new_table->bndry1 = 0;
+	new_table->bndry2 = 1;
+	new_table->bndry3 = 2;
+	new_table->his_i = 0;
+	for(int i = 0; i < 4; i++)
+		new_table->pri[i] = i;
 	return new_table;
 }
 
@@ -572,16 +581,62 @@ bool check_buffer(dram_buffer_t* buffer, uint64_t addr)
 	uint64_t tag = addr / UINT21_MAX;
 	uint32_t index = ((addr % UINT21_MAX) / OFFSET);
 	bool flag_hit = false;
+	if(table->his_i < HIS_SIZE)
+	{
+		table->his_table[table->his_i] = addr;
+		table->his_i++;
+	}
+	else
+	{
+		uint64_t max = 0, min = UINT64_MAX, interval;
+		uint32_t cnt[4] = {0,}, number;
+		for(int i = 0; i < HIS_SIZE; i++)
+		{
+			if(table->his_table[i] > max)
+				max = table->his_table[i];
+			if(table->his_table[i] < min)
+				min = table->his_table[i];
+		}
+		interval = (max - min)/4;
+		table->bndry1 = min + interval;
+		table->bndry2 = min + interval * 2;
+		table->bndry3 = min + interval * 3;
+		for(int i = 0; i < HIS_SIZE; i++)
+		{
+			cnt[check_region(table, table->his_table[i])]++;
+		}
+		for(int j = 0; j < 4; j++)
+		{
+			min = UINT32_MAX;
+			for(int i = 0; i < 4; i++)
+			{
+				if(cnt[i] < min)
+				{
+					min = cnt[i];
+					number = i;
+				}
+			}
+			table->pri[j] = number;
+			cnt[number] = UINT32_MAX;
+		}
+		uint64_t data;
+		for(int i = 0; i < CACHE_WAY; i++)
+		{
+			for(uint32_t j = 0; j < INDEX_SIZE; j++)
+			{
+				data = table->tag_table[i][j] * UINT21_MAX + j * OFFSET;
+				table->region_table[i][j] = check_region(table, data);
+			}
+		}
+		table->his_i = 0;
+	}
+
 	for (uint32_t i = 0; i < CACHE_WAY; i++)
 	{
 		if((table->tag_table[i][index] == tag) && table->valid[i][index])
 		{
-			//주석 해제하면 LRU, 주석상태면 FIFO
-			//table->count[i][index] = 0;
 			flag_hit = true;
 		}
-		else
-			table->count[i][index]++;
 	}
 	if(flag_hit)
 		return true;
@@ -601,20 +656,22 @@ void insert_buffer(buffer_table_t* table, uint64_t addr)
 	}
 	if (flag_full)
 	{
-		uint32_t max = 0;
 		uint32_t number;
-		for(uint32_t i = 0; i < CACHE_WAY; i++)
+		for(int j = 0; j < 4; j++)
 		{
-			if(table->count[i][index] > max)
+			for(uint32_t i = 0; i < CACHE_WAY; i++)
 			{
-				max = table->count[i][index];
-				number = i;
+				if(table->region_table[i][index] == table->pri[j])
+				{
+					number = i;
+					i = CACHE_WAY;
+					j = 4;
+				}
 			}
 		}
-		//주석해제하면 random
-		//number = rand() % CACHE_WAY;
+		
 		table->tag_table[number][index] = tag;
-		table->count[number][index] = 0;
+		table->region_table[number][index] = check_region(table, addr);
 	}
 	else
 	{
@@ -623,10 +680,23 @@ void insert_buffer(buffer_table_t* table, uint64_t addr)
 			if(!table->valid[i][index])
 			{
 				table->tag_table[i][index] = tag;
-				table->count[i][index] = 0;
 				table->valid[i][index] = true;
+				table->region_table[i][index] = check_region(table, addr);
 				i = CACHE_WAY;
 			}
 		}
 	}
 }
+
+int check_region(buffer_table_t* table, uint64_t addr)
+{
+	if(addr < table->bndry1)
+		return 0;
+	else if(addr < table->bndry2)
+		return 1;
+	else if(addr < table->bndry3)
+		return 2;
+	else
+		return 3;
+}
+
